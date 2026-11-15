@@ -12,6 +12,7 @@ import { InsightsPromptBuilder } from "../prompts/insightsPrompt";
 import { AiProviderFactory } from "../providers/aiProviderFactory";
 import { aiInsightsCacheService, AiInsightsCacheService } from "../caching/aiInsightsCache";
 import { aiGeneratedResponseSchema } from "../validators/insightsSchemas";
+import { AiQuotaManager } from "../security/aiQuotaManager";
 import { AppError } from "@/lib/errors/appError";
 
 export class AiInsightsService {
@@ -53,12 +54,16 @@ export class AiInsightsService {
       );
     }
 
-    // 2. Check Cache
+    // 2. Check Fresh Cache (Zero-token fast path)
+    const providerInstance = AiProviderFactory.getProvider();
     const queryHash = AiInsightsCacheService.generateHash({
       propertyId: property.id,
       dateRange,
       language,
       focus,
+      provider: providerInstance.name,
+      model: providerInstance.defaultModel,
+      schemaVersion: "v2-structured",
     });
 
     if (!refresh) {
@@ -71,7 +76,25 @@ export class AiInsightsService {
       }
     }
 
-    // 3. Build Grounded Analytics Context
+    // 3. Check Quotas Before Calling LLM
+    try {
+      AiQuotaManager.checkWorkspaceLimit(workspaceId);
+      await AiQuotaManager.checkGlobalProviderLimit(providerInstance.name, 1200);
+    } catch (quotaErr: any) {
+      // If rate limited, attempt graceful stale cache fallback
+      if (quotaErr.status === 429 || quotaErr.statusCode === 429) {
+        const stale = await aiInsightsCacheService.getStaleFallback({
+          connectedPropertyId: property.id,
+          maxAgeHours: 24,
+        });
+        if (stale) {
+          return stale;
+        }
+      }
+      throw quotaErr;
+    }
+
+    // 4. Build Grounded Analytics Context
     const context = await AnalyticsContextBuilder.buildContext({
       workspaceId,
       propertyId: property.id,
@@ -79,23 +102,23 @@ export class AiInsightsService {
       refresh,
     });
 
-    // 4. Build Facts Dictionary (for immutable O(1) fact lookup)
+    // 5. Build Facts Dictionary (for immutable O(1) fact lookup)
     const verifiedFacts: Record<string, DeterministicFact> = {};
     for (const fact of context.facts) {
       verifiedFacts[fact.factId] = fact;
     }
 
-    // 5. Build Prompts
+    // 6. Build Prompts
     const systemPrompt = InsightsPromptBuilder.getSystemPrompt(language);
     const userPrompt = InsightsPromptBuilder.getUserPrompt(context, focus);
 
-    // 6. Call AI Provider
-    const provider = AiProviderFactory.getProvider();
+    // 7. Acquire In-Flight Concurrency Slot & Execute Provider Call
+    const releaseSlot = await AiQuotaManager.acquireConcurrencySlot();
     const startTime = Date.now();
     let rawResponse;
 
     try {
-      rawResponse = await provider.generateInsights(systemPrompt, userPrompt, {
+      rawResponse = await providerInstance.generateInsights(systemPrompt, userPrompt, {
         maxTokens: 2048,
         timeoutMs: 25000,
       });
@@ -108,8 +131,8 @@ export class AiInsightsService {
             userId,
             connectedPropertyId: property.id,
             feature: "insights",
-            provider: provider.name,
-            model: provider.defaultModel,
+            provider: providerInstance.name,
+            model: providerInstance.defaultModel,
             promptTokens: 0,
             completionTokens: 0,
             totalTokens: 0,
@@ -121,10 +144,24 @@ export class AiInsightsService {
       } catch (logErr) {
         console.error("Failed to persist AI usage error log:", logErr);
       }
+
+      // Check for stale fallback on provider 429
+      if (err.status === 429 || err.statusCode === 429) {
+        const stale = await aiInsightsCacheService.getStaleFallback({
+          connectedPropertyId: property.id,
+          maxAgeHours: 24,
+        });
+        if (stale) {
+          return stale;
+        }
+      }
+
       throw err;
+    } finally {
+      releaseSlot();
     }
 
-    // 7. Parse and Validate Model Response with Zod
+    // 8. Parse and Validate Model Response with Zod
     const cleanedJson = this.cleanJsonResponse(rawResponse.rawContent);
     let parsedJson: any;
 
@@ -153,7 +190,7 @@ export class AiInsightsService {
         );
       }
     } else {
-      // Bounded fallback: Map deterministic anomalies directly if validation failed
+      // Safe fallback: Map deterministic anomalies directly with 3-tier structure
       console.warn("AI response validation warning, applying safe fallback structure:", validation.error.format());
       structuredSummary =
         parsedJson.summary ||
@@ -162,8 +199,11 @@ export class AiInsightsService {
         type: a.type,
         severity: a.severity,
         title: a.title,
-        explanation: a.description,
+        observation: a.description,
+        hypothesis: "Statistical pattern detected; verify recent campaign traffic sources or site updates.",
+        recommendation: "Review marketing channel campaigns and landing page performance.",
         factReferences: [a.metric],
+        explanation: a.description,
         recommendations: ["Review marketing channel campaigns and landing page performance."],
       }));
 
@@ -173,15 +213,18 @@ export class AiInsightsService {
             type: "general",
             severity: "info",
             title: "Performance Steady",
-            explanation: `Total of ${context.summary.sessions} sessions and ${context.summary.activeUsers} active users recorded with an engagement rate of ${context.summary.engagementRate}%.`,
+            observation: `Total of ${context.summary.sessions} sessions and ${context.summary.activeUsers} active users recorded with an engagement rate of ${context.summary.engagementRate}%.`,
+            hypothesis: "Audience traffic and engagement show steady consistency over this reporting window.",
+            recommendation: "Continue tracking traffic acquisition and optimizing top converting channels.",
             factReferences: ["fact_total_sessions", "fact_engagement_rate"],
-            recommendations: ["Continue tracking traffic acquisition and optimizing top converting channels."],
+            explanation: `Total of ${context.summary.sessions} sessions and ${context.summary.activeUsers} active users recorded.`,
+            recommendations: ["Continue tracking traffic acquisition."],
           },
         ];
       }
     }
 
-    // 8. Construct Final Verified Result
+    // 9. Construct Final Verified Result (Strictly Nullable Health Score & Transparent Disclaimer)
     const nowIso = new Date().toISOString();
     const result: AiInsightsResult = {
       propertyId: property.id,
@@ -192,9 +235,12 @@ export class AiInsightsService {
       provider: rawResponse.provider,
       model: rawResponse.model,
       summary: structuredSummary,
+      healthScore: null, // Nullable: never arbitrary
       insights: structuredInsights,
       verifiedFacts,
       limitations: structuredLimitations,
+      disclaimer:
+        "AI insights provide automated observations and hypotheses grounded in GA4 metrics. Hypotheses are unverified possibilities and should be verified before making business decisions.",
       cache: {
         hit: false,
       },
@@ -205,7 +251,7 @@ export class AiInsightsService {
       },
     };
 
-    // 9. Persist to PostgreSQL Cache and Usage Log
+    // 10. Persist to PostgreSQL Cache and Usage Log
     try {
       await Promise.all([
         aiInsightsCacheService.set({

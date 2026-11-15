@@ -7,24 +7,33 @@ export class AiInsightsCacheService {
 
   /**
    * Deterministic query hash.
+   * Incorporates property, dateRange, language, focus, provider, model, schemaVersion, and dataFingerprint.
    */
   static generateHash(params: {
     propertyId: string;
     dateRange: string;
     language: AiLanguage;
     focus?: InsightType;
+    provider?: string;
+    model?: string;
+    schemaVersion?: string;
+    dataFingerprint?: string;
   }): string {
     const serialized = JSON.stringify({
       p: params.propertyId,
       d: params.dateRange,
       l: params.language,
       f: params.focus || "general",
+      pr: params.provider || "groq",
+      m: params.model || "openai/gpt-oss-120b",
+      v: params.schemaVersion || "v2-structured",
+      df: params.dataFingerprint || "",
     });
     return crypto.createHash("sha256").update(serialized).digest("hex");
   }
 
   /**
-   * Fetches cached AI insights from PostgreSQL.
+   * Fetches fresh cached AI insights from PostgreSQL.
    */
   async get(params: {
     connectedPropertyId: string;
@@ -59,11 +68,69 @@ export class AiInsightsCacheService {
       provider: entry.provider,
       model: entry.model,
       summary: entry.summary,
+      healthScore: null,
       insights: (entry.insights as any)?.items || [],
       verifiedFacts: (entry.verifiedFacts as any) || {},
       limitations: (entry.limitations as any) || [],
+      disclaimer:
+        "AI insights provide automated observations and hypotheses grounded in GA4 metrics. Hypotheses are unverified possibilities and should be verified before making business decisions.",
       cache: {
         hit: true,
+        cachedAt: entry.fetchedAt.toISOString(),
+        expiresAt: entry.expiresAt.toISOString(),
+      },
+      usage: {
+        promptTokens: entry.promptTokens || 0,
+        completionTokens: entry.completionTokens || 0,
+        totalTokens: entry.totalTokens || 0,
+      },
+    };
+  }
+
+  /**
+   * Fetches a stale cached insight for rate-limit fallback.
+   * Only returns entries created within maxAgeHours (default 24h).
+   */
+  async getStaleFallback(params: {
+    connectedPropertyId: string;
+    maxAgeHours?: number;
+  }): Promise<AiInsightsResult | null> {
+    const maxAgeHours = params.maxAgeHours || 24;
+    const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+
+    const entry = await prisma.aiInsightCache.findFirst({
+      where: {
+        connectedPropertyId: params.connectedPropertyId,
+        fetchedAt: { gte: cutoff },
+      },
+      orderBy: { fetchedAt: "desc" },
+    });
+
+    if (!entry) return null;
+
+    return {
+      propertyId: entry.connectedPropertyId,
+      dateRange: {
+        startDate: (entry.insights as any)?._dateRange?.startDate || "N/A",
+        endDate: (entry.insights as any)?._dateRange?.endDate || "N/A",
+        label: entry.dateRange,
+      },
+      language: entry.language as AiLanguage,
+      generatedAt: entry.fetchedAt.toISOString(),
+      dataFetchedAt: entry.fetchedAt.toISOString(),
+      provider: entry.provider,
+      model: entry.model,
+      summary: entry.summary,
+      healthScore: null,
+      insights: (entry.insights as any)?.items || [],
+      verifiedFacts: (entry.verifiedFacts as any) || {},
+      limitations: (entry.limitations as any) || [],
+      disclaimer:
+        "AI insights provide automated observations and hypotheses grounded in GA4 metrics. Hypotheses are unverified possibilities and should be verified before making business decisions.",
+      cache: {
+        hit: true,
+        isStale: true,
+        staleNotice: "Served from cached insights due to high AI provider demand.",
         cachedAt: entry.fetchedAt.toISOString(),
         expiresAt: entry.expiresAt.toISOString(),
       },
