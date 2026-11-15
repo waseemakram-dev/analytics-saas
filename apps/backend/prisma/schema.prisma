@@ -1,0 +1,233 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ----------------------------------------------------
+// 1. IDENTITY & USER ACCOUNTS (AUTH.JS V5 SPECIFICATION)
+// ----------------------------------------------------
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?   // Argon2id hash for credentials authentication
+  role          UserRole  @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts         Account[]
+  sessions         Session[]
+  workspaceMembers WorkspaceMember[]
+
+  @@index([email])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String  // "oauth" | "oidc"
+  provider          String  // e.g. "google" (for identity login only)
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String   // User email address
+  token      String   // Hashed or secure random token
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  email     String
+  tokenHash String   @unique // Stored as SHA-256 hash of token to prevent leak
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+}
+
+// ----------------------------------------------------
+// 2. WORKSPACE & MULTI-TENANT MEMBERSHIP
+// ----------------------------------------------------
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members             WorkspaceMember[]
+  integrationAccounts IntegrationAccount[]
+  connectedProperties ConnectedProperty[]
+  analyticsCaches     AnalyticsCache[]
+  syncLogs            IntegrationSyncLog[]
+
+  @@index([slug])
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(OWNER)
+  createdAt   DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+// ----------------------------------------------------
+// 3. INTEGRATIONS & GOOGLE ANALYTICS 4 DATA MODELS
+// ----------------------------------------------------
+
+enum IntegrationStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+enum PropertyStatus {
+  ACTIVE
+  PAUSED
+  DISCONNECTED
+}
+
+model IntegrationAccount {
+  id                   String            @id @default(cuid())
+  workspaceId          String
+  provider             String            @default("google")
+  providerAccountId    String            // Google user ID / sub
+  email                String            // Google account email
+  encryptedAccessToken String?           @db.Text
+  encryptedRefreshToken String?          @db.Text
+  accessTokenIv        String?           // Hex IV for access token
+  refreshTokenIv       String?           // Hex IV for refresh token
+  accessTokenTag       String?           // Hex Auth Tag for access token
+  refreshTokenTag      String?           // Hex Auth Tag for refresh token
+  keyVersion           Int               @default(1)
+  expiresAt            DateTime?
+  scope                String?           @db.Text
+  status               IntegrationStatus @default(ACTIVE)
+  lastError            String?           @db.Text
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  workspace  Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  properties ConnectedProperty[]
+
+  @@unique([workspaceId, provider, providerAccountId])
+  @@index([workspaceId])
+  @@index([status])
+}
+
+model ConnectedProperty {
+  id                   String         @id @default(cuid())
+  workspaceId          String
+  integrationAccountId String
+  propertyId           String         // GA4 Property ID (numeric digits)
+  displayName          String
+  accountName          String?        // Parent GA4 Account Name (e.g. accounts/123)
+  accountId            String?        // Parent GA4 Account ID
+  currencyCode         String?        @default("USD")
+  timeZone             String?        @default("UTC")
+  isDefault            Boolean        @default(false)
+  status               PropertyStatus @default(ACTIVE)
+  lastFetchedAt        DateTime?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  workspace          Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  integrationAccount IntegrationAccount @relation(fields: [integrationAccountId], references: [id], onDelete: Cascade)
+  caches             AnalyticsCache[]
+
+  @@unique([workspaceId, propertyId])
+  @@index([workspaceId])
+  @@index([integrationAccountId])
+  @@index([propertyId])
+}
+
+model AnalyticsCache {
+  id                  String   @id @default(cuid())
+  workspaceId         String
+  connectedPropertyId String
+  reportType          String   // "overview" | "realtime" | "traffic" | "audience" | "technology" | "pages" | "events"
+  queryHash           String   // Deterministic SHA-256 hash of query params
+  dateRange           String?  // e.g. "today", "yesterday", "7d", "30d", "90d", "custom"
+  parameters          Json?    // Serialized query parameters
+  data                Json     // Structured normalized response data
+  fetchedAt           DateTime @default(now())
+  expiresAt           DateTime
+  isStale             Boolean  @default(false)
+
+  workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  property  ConnectedProperty @relation(fields: [connectedPropertyId], references: [id], onDelete: Cascade)
+
+  @@unique([connectedPropertyId, reportType, queryHash])
+  @@index([workspaceId])
+  @@index([connectedPropertyId])
+  @@index([expiresAt])
+}
+
+model IntegrationSyncLog {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  propertyId   String?
+  endpoint     String
+  status       String   // "SUCCESS" | "ERROR"
+  errorMessage String?  @db.Text
+  quotaUsed    Int?
+  durationMs   Int?
+  createdAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+}
