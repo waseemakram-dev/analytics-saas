@@ -59,6 +59,7 @@ export interface AnalyticsGroundingContext {
     averageSessionDuration: number; // seconds
     conversions: number;
     eventCount: number;
+    sessionKeyEventRate?: number; // Official GA4 Session Key Event Rate (Percentage 0-100)
   };
   channels: Array<{
     channelGroup: string;
@@ -83,9 +84,12 @@ export interface GeneratedInsightItem {
   type: InsightType;
   severity: InsightSeverity;
   title: string;
-  explanation: string;
+  observation: string; // Grounded finding directly supported by verified GA4 data
+  hypothesis: string;  // Plausible explanation using conditional language (not confirmed cause)
+  recommendation: string; // Actionable test or practical next step
   factReferences: string[];
-  recommendations: string[];
+  explanation?: string; // Backwards-compatible alias for observation
+  recommendations?: string[]; // Backwards-compatible alias for array of recommendations
 }
 
 export interface AiInsightsResult {
@@ -101,13 +105,17 @@ export interface AiInsightsResult {
   provider: string;
   model: string;
   summary: string;
+  healthScore?: number | null; // Nullable until validated, configurable methodology is established
   insights: GeneratedInsightItem[];
   verifiedFacts: Record<string, DeterministicFact>;
   limitations: string[];
+  disclaimer?: string;
   cache: {
     hit: boolean;
     cachedAt?: string;
     expiresAt?: string;
+    isStale?: boolean;
+    staleNotice?: string;
   };
   usage?: {
     promptTokens: number;
