@@ -67,6 +67,18 @@ export class GA4DataService {
     return isNaN(n) ? 0 : n;
   }
 
+  /**
+   * Normalizes rate metric (decimal 0-1) to percentage (0-100).
+   * Avoids double-multiplying if already on 0-100 scale.
+   */
+  private normalizeRate(val: string | null | undefined): number | undefined {
+    if (val === null || val === undefined || val === "") return undefined;
+    const n = Number(val);
+    if (isNaN(n)) return undefined;
+    const pct = n <= 1 && n >= 0 ? n * 100 : n;
+    return Math.round(pct * 100) / 100;
+  }
+
   // ----------------------------------------------------
   // 1. OVERVIEW REPORT
   // ----------------------------------------------------
@@ -127,6 +139,7 @@ export class GA4DataService {
             { name: "averageSessionDuration" },
             { name: "eventCount" },
             { name: "conversions" },
+            { name: "sessionKeyEventRate" },
           ],
         },
       });
@@ -158,6 +171,7 @@ export class GA4DataService {
         averageSessionDuration: Math.round(this.num(row[7]?.value) * 10) / 10,
         eventCount: this.num(row[8]?.value),
         conversions: this.num(row[9]?.value),
+        sessionKeyEventRate: this.normalizeRate(row[10]?.value),
       };
 
       const trend = (trendRes.data?.rows || []).map((r: any) => ({

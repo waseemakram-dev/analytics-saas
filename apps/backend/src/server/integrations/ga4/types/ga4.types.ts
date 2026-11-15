@@ -71,6 +71,7 @@ export interface OverviewReport {
     averageSessionDuration: number; // Seconds
     eventCount: number;
     conversions: number;
+    sessionKeyEventRate?: number; // Official GA4 Session Key Event Rate (Percentage 0-100)
   };
   trend: Array<{
     date: string;

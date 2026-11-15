@@ -93,17 +93,41 @@ export class MetricsCalculator {
       metric: "conversions",
       currentValue: summary.conversions,
       formattedValue: summary.conversions.toLocaleString(),
-      label: "Key Events / Conversions",
+      label: "Total Key Events (Count)",
     });
 
-    // 2. Computed Ratios
-    const conversionRate = this.safePercentage(summary.conversions, summary.sessions);
+    // 2. Official GA4 Session Key Event Rate & Key Events per Session Ratio
+    if (summary.sessionKeyEventRate !== undefined && summary.sessionKeyEventRate !== null) {
+      facts.push({
+        factId: "fact_session_key_event_rate",
+        metric: "sessionKeyEventRate",
+        currentValue: summary.sessionKeyEventRate,
+        formattedValue: `${summary.sessionKeyEventRate.toFixed(2)}%`,
+        label: "Session Key Event Rate (Official GA4)",
+      });
+    }
+
+    const keyEventsPerSession = this.safeRatio(summary.conversions, summary.sessions);
+    facts.push({
+      factId: "fact_key_events_per_session",
+      metric: "keyEventsPerSession",
+      currentValue: keyEventsPerSession,
+      formattedValue: keyEventsPerSession.toFixed(2),
+      label: "Key Events per Session (Ratio)",
+    });
+
+    // Backwards-compatible conversion rate fact (uses official sessionKeyEventRate if available, or custom ratio)
+    const conversionRate = summary.sessionKeyEventRate !== undefined && summary.sessionKeyEventRate !== null
+      ? summary.sessionKeyEventRate
+      : this.safePercentage(summary.conversions, summary.sessions);
     facts.push({
       factId: "fact_conversion_rate",
       metric: "conversionRate",
       currentValue: conversionRate,
       formattedValue: `${conversionRate.toFixed(2)}%`,
-      label: "Session Conversion Rate",
+      label: summary.sessionKeyEventRate !== undefined
+        ? "Session Key Event Rate"
+        : "Key Events per Session Ratio",
     });
 
     const pagesPerSession = this.safeRatio(summary.screenPageViews, summary.sessions);
