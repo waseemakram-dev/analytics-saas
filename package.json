@@ -1,0 +1,19 @@
+{
+  "name": "analytics-saas-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=@analytics-saas/backend",
+    "dev:frontend": "npm run dev --workspace=@analytics-saas/frontend",
+    "build:backend": "npm run build --workspace=@analytics-saas/backend",
+    "build:frontend": "npm run build --workspace=@analytics-saas/frontend",
+    "test:backend": "npm run test --workspace=@analytics-saas/backend",
+    "prisma:generate": "npm run prisma:generate --workspace=@analytics-saas/backend",
+    "prisma:migrate": "npm run prisma:migrate --workspace=@analytics-saas/backend",
+    "prisma:push": "npm run prisma:push --workspace=@analytics-saas/backend"
+  }
+}
