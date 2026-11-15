@@ -25,15 +25,15 @@ describe("Real PostgreSQL AI Database Tests (analytics_saas_test)", () => {
     const adapter = new PrismaPg({ connectionString: testDbUrl });
     testPrisma = new PrismaClient({ adapter });
 
-    // Clean up test data
-    await testPrisma.aiUsageLog.deleteMany();
-    await testPrisma.aiInsightCache.deleteMany();
-    await testPrisma.analyticsCache.deleteMany();
-    await testPrisma.connectedProperty.deleteMany();
-    await testPrisma.integrationAccount.deleteMany();
-    await testPrisma.workspaceMember.deleteMany();
-    await testPrisma.workspace.deleteMany();
-    await testPrisma.user.deleteMany();
+    // Clean up specifically isolated test data
+    const existingWs = await testPrisma.workspace.findUnique({ where: { slug: "ai-test-workspace" } });
+    if (existingWs) {
+      await testPrisma.workspace.delete({ where: { id: existingWs.id } });
+    }
+    const existingUser = await testPrisma.user.findUnique({ where: { email: "ai.tester@test.com" } });
+    if (existingUser) {
+      await testPrisma.user.delete({ where: { id: existingUser.id } });
+    }
 
     // Seed test user, workspace, and property
     const user = await testPrisma.user.create({
@@ -85,13 +85,12 @@ describe("Real PostgreSQL AI Database Tests (analytics_saas_test)", () => {
 
   afterAll(async () => {
     if (testPrisma) {
-      await testPrisma.aiUsageLog.deleteMany();
-      await testPrisma.aiInsightCache.deleteMany();
-      await testPrisma.connectedProperty.deleteMany();
-      await testPrisma.integrationAccount.deleteMany();
-      await testPrisma.workspaceMember.deleteMany();
-      await testPrisma.workspace.deleteMany();
-      await testPrisma.user.deleteMany();
+      if (testWorkspaceId) {
+        await testPrisma.workspace.deleteMany({ where: { id: testWorkspaceId } });
+      }
+      if (testUserId) {
+        await testPrisma.user.deleteMany({ where: { id: testUserId } });
+      }
       await testPrisma.$disconnect();
     }
   });

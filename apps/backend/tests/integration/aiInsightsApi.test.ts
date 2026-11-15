@@ -199,6 +199,6 @@ describe("AI Insights API Route (POST /api/ai/insights)", () => {
     const json = await res.json();
 
     expect(res.status).toBe(429);
-    expect(json.error?.code).toBe("RATE_LIMIT_EXCEEDED");
+    expect(json.error?.code).toBe("AI_WORKSPACE_RATE_LIMIT_EXCEEDED");
   });
 });

@@ -113,6 +113,61 @@ describe("Deterministic Analysis & Analytics Grounding", () => {
       expect(factMap.get("fact_top_channel")?.formattedValue).toContain("Organic Search");
       expect(factMap.get("fact_top_page")?.formattedValue).toContain("Home Page");
     });
+
+    it("should accurately handle official GA4 sessionKeyEventRate vs custom keyEventsPerSession ratio", () => {
+      // Scenario: 50 sessions with 200 key events (4.0 key events per session), but official sessionKeyEventRate is 72.5%
+      const multiKeyEventOverview: OverviewReport = {
+        ...baseOverview,
+        summary: {
+          ...baseOverview.summary,
+          sessions: 50,
+          conversions: 200,
+          sessionKeyEventRate: 72.5,
+        },
+      };
+
+      const facts = MetricsCalculator.calculateFacts(multiKeyEventOverview);
+      const factMap = new Map(facts.map((f) => [f.factId, f]));
+
+      // 1. Total key events count
+      expect(factMap.get("fact_conversions")?.currentValue).toBe(200);
+
+      // 2. Official session key event rate
+      const officialRate = factMap.get("fact_session_key_event_rate");
+      expect(officialRate).toBeDefined();
+      expect(officialRate?.currentValue).toBe(72.5);
+      expect(officialRate?.formattedValue).toBe("72.50%");
+      expect(officialRate?.label).toBe("Session Key Event Rate (Official GA4)");
+
+      // 3. Custom ratio (Key events per session)
+      const ratio = factMap.get("fact_key_events_per_session");
+      expect(ratio).toBeDefined();
+      expect(ratio?.currentValue).toBe(4); // 200 / 50
+      expect(ratio?.formattedValue).toBe("4.00");
+      expect(ratio?.label).toBe("Key Events per Session (Ratio)");
+
+      // 4. Conversion rate fact should prioritize official metric
+      expect(factMap.get("fact_conversion_rate")?.currentValue).toBe(72.5);
+    });
+
+    it("should gracefully handle zero sessions and missing sessionKeyEventRate without throwing", () => {
+      const zeroOverview: OverviewReport = {
+        ...baseOverview,
+        summary: {
+          ...baseOverview.summary,
+          sessions: 0,
+          conversions: 0,
+          sessionKeyEventRate: undefined,
+        },
+      };
+
+      const facts = MetricsCalculator.calculateFacts(zeroOverview);
+      const factMap = new Map(facts.map((f) => [f.factId, f]));
+
+      expect(factMap.get("fact_session_key_event_rate")).toBeUndefined();
+      expect(factMap.get("fact_key_events_per_session")?.currentValue).toBe(0);
+      expect(factMap.get("fact_conversion_rate")?.currentValue).toBe(0);
+    });
   });
 
   describe("AnomalyDetector", () => {
