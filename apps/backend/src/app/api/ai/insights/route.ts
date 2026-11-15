@@ -4,11 +4,10 @@ import {
   getUserActiveWorkspace,
   requirePropertyAccess,
 } from "@/server/security/guards";
-import { rateLimiter } from "@/server/security/rateLimiter";
+import { AiQuotaManager } from "@/server/ai/security/aiQuotaManager";
 import { generateInsightsInputSchema } from "@/server/ai/validators/insightsSchemas";
 import { aiInsightsService } from "@/server/ai/services/aiInsightsService";
 import { jsonResponse, handleApiError } from "@/lib/apiResponse";
-import { AppError } from "@/lib/errors/appError";
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,17 +17,8 @@ export async function POST(req: NextRequest) {
     // 2. Derive active workspace from verified membership
     const membership = await getUserActiveWorkspace(authUser.userId);
 
-    // 3. Workspace-scoped rate limit (Free Tier Protection: max 15 AI calls per minute per workspace)
-    const rateLimitKey = `ai_insights:${membership.workspaceId}`;
-    const isLimited = rateLimiter.isRateLimited(rateLimitKey, 15, 60 * 1000);
-
-    if (isLimited) {
-      throw new AppError(
-        "AI request rate limit exceeded for this workspace. Please wait before generating more insights.",
-        429,
-        "RATE_LIMIT_EXCEEDED"
-      );
-    }
+    // 3. Workspace-scoped rate limit (Layer A usage limit)
+    AiQuotaManager.checkWorkspaceLimit(membership.workspaceId);
 
     // 4. Validate input payload
     const body = await req.json().catch(() => ({}));
