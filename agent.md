@@ -95,7 +95,7 @@ Before any commit is finalized:
 | **GA4 Data Reporting & Caching** | ✅ COMPLETE | `src/server/integrations/ga4/services/ga4DataService.ts`<br>`api/analytics/*` | `src/lib/api/analyticsApi.ts` | 23 tests |
 | **Analytics Dashboard Views** | ✅ COMPLETE | N/A (Consumes reporting APIs) | `src/app/dashboard/overview/*`<br>`traffic/*`, `pages/*`, `realtime/*` | Visual E2E |
 | **Explain Every Metric** | ✅ COMPLETE | `packages/shared/src/metrics/*` | `src/components/analytics/MetricTooltip.tsx` | Verified |
-| **Stage 4A: AI Insights Backend** | ✅ COMPLETE | `src/server/ai/*`<br>`api/ai/insights/route.ts` | N/A (Stage 4B) | 25 tests |
+| **Stage 4A: AI Insights Backend** | ✅ HARDENED | `src/server/ai/*`<br>`api/ai/insights/route.ts` | N/A (Stage 4B) | 33 tests |
 | **Stage 4B: AI Insights Frontend** | 🟡 READY | Ready to consume `POST /api/ai/insights` | `src/components/ai/*`<br>`src/app/dashboard/overview/*` | In Progress |
 | **Stage 5: Ask AI Analytics Chat** | ⚪ PLANNED | Planned (`src/server/ai/chat/*`) | Planned (`src/components/ai/ChatDrawer.tsx`) | Pending |
 | **Stage 6: Reports & Exports (PDF/CSV)** | ⚪ PLANNED | Planned (`src/server/reports/*`) | Planned (`src/components/reports/*`) | Pending |
@@ -107,47 +107,68 @@ Before any commit is finalized:
 
 ---
 
-## 5. Stage 4A: AI Intelligence Subsystem Details
+## 5. Stage 4A: Hardened AI Intelligence Architecture
 
-The AI backend features a 5-layer pipeline:
+The AI backend features a hardened 6-layer pipeline:
 
 ```mermaid
-flowchart LR
-    A["GA4 Raw Data"] --> B["Deterministic Calculations\n(Facts F01..F07)"]
+flowchart TD
+    A["GA4 Raw Data + Official sessionKeyEventRate"] --> B["Deterministic Calculations\n(Facts F01..F08 & Key Events per Session Ratio)"]
     B --> C["Deterministic Anomaly Detector\n(Anomalies A01..A05)"]
-    C --> D["Sanitized Grounding Context"]
-    D --> E["Bilingual Prompt Builder\n(English & Roman Urdu)"]
-    E --> F["Groq Cloud API\n(openai/gpt-oss-120b)"]
-    F --> G["Zod Validation & Fact Cross-Check"]
-    G --> H["PostgreSQL Cache (1h TTL)\n& Token Usage Log"]
+    C --> D["Sanitized Grounding Context\n(Strips Control Chars & Untrusted Strings)"]
+    
+    subgraph Two-Tier Quota & Cache Protection
+        D --> CacheFresh{"Cache Lookup\n(queryHash with schema v2 & data fingerprint)"}
+        CacheFresh -- Fresh Cache Hit --> ReturnFresh["Instant Result (0 Tokens Used)"]
+        CacheFresh -- Cache Miss --> QuotaCheck{"Two-Tier Quota Guard\n(Layer A: WS 5 RPM, Layer B: Global 20 RPM/6k TPM)"}
+        QuotaCheck -- Quota Exceeded --> StaleFallback{"Stale Cache Available?"}
+        StaleFallback -- Yes (< 24h) --> ReturnStale["Return Stale Fallback with Notice"]
+        StaleFallback -- No --> Throw429["Throw 429 Rate Limit Error"]
+    end
+
+    QuotaCheck -- Allowed --> Concurrency["In-Flight Concurrency Slot\n(Max 2 simultaneous Groq calls)"]
+    Concurrency --> PromptBuilder["Bilingual Prompt Builder\n(3-Tier: Observation, Hypothesis, Recommendation)"]
+    PromptBuilder --> Groq["Groq API (openai/gpt-oss-120b)\n(Strict JSON Mode, 25s Timeout, Low Temp 0.2)"]
+    Groq --> ZodValidation["Zod Schema Validation\n(healthScore: null, 3-tier items, transparent disclaimer)"]
+    ZodValidation --> Persistence["PostgreSQL: AiInsightCache & AiUsageLog"]
+    Persistence --> Output["Client JSON Response (AiInsightsResult)"]
 ```
 
 ### Core Architecture Components:
-1. **Provider Abstraction** (`src/server/ai/providers/`):
-   - `aiProvider.interface.ts`: Standard interface `IAiProvider`.
-   - `groqProvider.ts`: Groq SDK client with 25s timeout and exponential backoff retry.
-   - `aiProviderFactory.ts`: Resolves provider from `process.env.AI_PROVIDER`.
-2. **Analysis & Grounding** (`src/server/ai/analysis/` & `grounding/`):
-   - `metricsCalculator.ts`: Pre-calculates conversion rates, bounce rates, channel shares with immutable Fact IDs (`F01..F07`).
-   - `anomalyDetector.ts`: Detects zero traffic, low volume, bounce spikes, and channel concentration risk with Anomaly IDs (`A01..A05`).
-   - `analyticsContextBuilder.ts`: Gathers live GA4 data and sanitizes strings against prompt injection.
-3. **Prompts & Validation** (`src/server/ai/prompts/` & `validators/`):
-   - `insightsPrompt.ts`: Strict zero-hallucination prompts in English and Roman Urdu.
-   - `insightsSchemas.ts`: Zod schema validating executive summary, health score, insights, and anomalies.
-4. **Caching & Token Economics** (`src/server/ai/caching/`):
-   - `aiInsightsCache.ts`: SHA-256 deterministic query hashing with 1-hour TTL.
-   - `AiInsightCache` and `AiUsageLog` Prisma models.
-5. **API Route** (`src/app/api/ai/insights/route.ts`):
-   - Protected by Auth.js session authentication, workspace membership verification, property access verification, and workspace rate limiting (15 req/min).
+1. **Official GA4 Metric Integration**:
+   - Retrieves official `sessionKeyEventRate` directly from Google Analytics Data API (`v1beta`).
+   - Normalizes decimal rates (0-1) to human-readable percentages (0-100%) without double multiplication.
+   - Retains `keyEvents` as total count and computes `keyEventsPerSession` as an event-to-session ratio, avoiding misleading "conversion rate" labels.
+2. **Defensible Health Score Policy**:
+   - `healthScore: null` in current phase.
+   - LLMs are strictly forbidden from generating arbitrary numeric scores (e.g., arbitrary 85s).
+   - Prevents unscientific penalties until a validated, documented, and configurable scoring methodology is deployed.
+3. **Two-Tier Usage & Global Quota Management** (`src/server/ai/security/aiQuotaManager.ts`):
+   - **Layer A (Workspace Limit)**: Configurable per-tenant limit (default 5 req/min).
+   - **Layer B (Global Provider Quota)**: Shared PostgreSQL-backed limits protecting Groq Free Plan:
+     - Global RPM Limit (default 20 RPM vs 30 RPM quota).
+     - Global RPD Limit (default 900 RPD vs 1,000 RPD quota).
+     - Global TPM Limit (default 6,000 TPM vs 8,000 TPM quota).
+     - Global TPD Limit (default 180,000 TPD vs 200,000 TPD quota).
+   - **Concurrency Semaphore**: Limits simultaneous in-flight Groq requests (default max 2) to eliminate burst thundering herds.
+   - **Stale Cache Fallback**: When global limits or upstream 429s occur, automatically falls back to recent valid cached insights (<24h) labeled as `isStale: true` with a clear explanation.
+4. **3-Tier Grounded Output Structure** (`src/server/ai/validators/insightsSchemas.ts`):
+   - **Observation**: Factual finding directly proven by verified GA4 data citing Fact IDs.
+   - **Hypothesis**: Plausible marketing interpretation using conditional language (*"may indicate"*, *"could be related to"*). Prohibits stating unproven external causes (algorithm updates, competitor outages) as facts.
+   - **Recommendation**: Practical, actionable test or investigation step for the marketing team.
+   - **Disclaimer**: Transparent disclaimer acknowledging AI interpretations are assisted hypotheses that should be verified before business decisions.
+5. **Cache Correctness & Invalidation** (`src/server/ai/caching/aiInsightsCache.ts`):
+   - Cache key incorporates `propertyId`, `dateRange`, `language`, `focus`, `provider`, `model`, `schemaVersion` (`v2-structured`), and `dataFingerprint`.
+   - Prevents stale responses across model, prompt, schema, or data changes.
 
 ---
 
-## 6. Automated Test Suite (106 Passing Tests)
+## 6. Automated Test Suite (114 Passing Tests)
 
 ### Summary
-- **Total Test Suites**: 20 files
-- **Total Passing Tests**: 106 tests (0 failing, 0 skipped)
-- **Execution Time**: ~9.9s
+- **Total Test Suites**: 21 files
+- **Total Passing Tests**: 114 tests (0 failing, 0 skipped)
+- **Execution Time**: ~12.5s
 
 ### Test Files Reference:
 1. `tests/unit/password.test.ts` (5 tests) — Argon2id password hashing.
@@ -158,6 +179,19 @@ flowchart LR
 6. `tests/unit/ga4Encryption.test.ts` (6 tests) — AES-256-GCM token encryption.
 7. `tests/unit/ga4StateManager.test.ts` (4 tests) — OAuth state validation.
 8. `tests/unit/ga4QueryHash.test.ts` (2 tests) — Analytics query hashing.
+9. `tests/unit/ga4AdminAndDataServices.test.ts` (7 tests) — Google Analytics APIs.
+10. `tests/unit/aiProvider.test.ts` (5 tests) — AI provider factory, Groq retry, error mapping.
+11. `tests/unit/aiQuotaManager.test.ts` (5 tests) — Two-tier rate limits, global RPM/TPM, and concurrency.
+12. `tests/unit/aiAnalysisAndGrounding.test.ts` (9 tests) — Metrics math, official sessionKeyEventRate, prompt sanitization.
+13. `tests/unit/aiPromptsAndValidation.test.ts` (5 tests) — 3-tier structure, nullable healthScore, bilingual prompts.
+14. `tests/integration/apiRoutes.test.ts` (9 tests) — Auth HTTP routes.
+15. `tests/integration/authServices.test.ts` (10 tests) — Registration, verification, password reset.
+16. `tests/integration/realDatabase.test.ts` (5 tests) — PostgreSQL atomic user and workspace transactions.
+17. `tests/integration/ga4RealDatabase.test.ts` (6 tests) — Real PostgreSQL token encryption and property linkage.
+18. `tests/integration/ga4ApiRoutes.test.ts` (8 tests) — GA4 reporting API routes and caching.
+19. `tests/integration/aiInsightsApi.test.ts` (5 tests) — AI insights API route security, rate limits, and outputs.
+20. `tests/integration/aiRealDatabase.test.ts` (3 tests) — Real PostgreSQL AI caching, token logs, and cascade deletes.
+21. `tests/integration/groqLiveApi.test.ts` (1 test) — Live Groq cloud API connectivity and token bounds.
 9. `tests/unit/ga4AdminAndDataServices.test.ts` (7 tests) — Google Analytics APIs.
 10. `tests/unit/aiProvider.test.ts` (5 tests) — AI provider factory, Groq retry, error mapping.
 11. `tests/unit/aiAnalysisAndGrounding.test.ts` (7 tests) — Metrics math, anomaly detection, prompt sanitization.
