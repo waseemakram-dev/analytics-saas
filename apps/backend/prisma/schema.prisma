@@ -104,6 +104,8 @@ model Workspace {
   connectedProperties ConnectedProperty[]
   analyticsCaches     AnalyticsCache[]
   syncLogs            IntegrationSyncLog[]
+  aiInsightCaches     AiInsightCache[]
+  aiUsageLogs         AiUsageLog[]
 
   @@index([slug])
 }
@@ -187,6 +189,7 @@ model ConnectedProperty {
   workspace          Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   integrationAccount IntegrationAccount @relation(fields: [integrationAccountId], references: [id], onDelete: Cascade)
   caches             AnalyticsCache[]
+  aiInsightCaches    AiInsightCache[]
 
   @@unique([workspaceId, propertyId])
   @@index([workspaceId])
@@ -230,4 +233,59 @@ model IntegrationSyncLog {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+}
+
+// ----------------------------------------------------
+// 4. AI ANALYTICS INTELLIGENCE (STAGE 4A)
+// ----------------------------------------------------
+
+model AiInsightCache {
+  id                  String    @id @default(cuid())
+  workspaceId         String
+  connectedPropertyId String
+  dateRange           String    // e.g. "30d", "7d", "today", "yesterday", "90d"
+  language            String    @default("en") // "en" | "roman-ur"
+  queryHash           String    // Deterministic SHA-256 hash of (propertyId + dateRange + language + focus)
+  provider            String    @default("groq") // "groq"
+  model               String    @default("openai/gpt-oss-120b")
+  summary             String    @db.Text
+  insights            Json      // Structured validated insights array
+  limitations         Json?     // Array of data limitation strings
+  verifiedFacts       Json      // Immutable backend-calculated numeric facts
+  promptTokens        Int?
+  completionTokens    Int?
+  totalTokens         Int?
+  fetchedAt           DateTime  @default(now())
+  expiresAt           DateTime
+  isStale             Boolean   @default(false)
+
+  workspace           Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  property            ConnectedProperty @relation(fields: [connectedPropertyId], references: [id], onDelete: Cascade)
+
+  @@unique([connectedPropertyId, queryHash])
+  @@index([workspaceId])
+  @@index([connectedPropertyId])
+  @@index([expiresAt])
+}
+
+model AiUsageLog {
+  id                  String    @id @default(cuid())
+  workspaceId         String
+  userId              String
+  connectedPropertyId String
+  feature             String    // "insights"
+  provider            String    // "groq"
+  model               String
+  promptTokens        Int       @default(0)
+  completionTokens    Int       @default(0)
+  totalTokens         Int       @default(0)
+  status              String    // "SUCCESS" | "RATE_LIMITED" | "ERROR"
+  durationMs          Int
+  errorMessage        String?   @db.Text
+  createdAt           DateTime  @default(now())
+
+  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([userId, createdAt])
 }
